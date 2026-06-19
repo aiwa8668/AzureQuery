@@ -129,31 +129,6 @@ SYNC_CONFIG_FIELD_ORDER = [
 ]
 
 
-@app.errorhandler(HttpError)
-def handle_http_error(error: HttpError):
-    logger.warning("request failed: status=%s message=%s", error.status_code, error.message)
-    return jsonify({"message": error.message}), error.status_code
-
-
-@app.errorhandler(HTTPException)
-def handle_framework_http_error(error: HTTPException):
-    status_code = error.code or 500
-    message = error.description or error.name
-    logger.warning(
-        "request failed: status=%s path=%s message=%s",
-        status_code,
-        request.path,
-        message,
-    )
-    return jsonify({"message": message}), status_code
-
-
-@app.errorhandler(Exception)
-def handle_unexpected_error(error: Exception):
-    logger.exception("unexpected request failure")
-    return jsonify({"message": str(error) or "服务异常"}), 500
-
-
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -162,16 +137,6 @@ def index():
 @app.get("/favicon.ico")
 def favicon():
     return Response(status=204)
-
-
-@app.get("/settings")
-def settings_page():
-    return redirect("/query")
-
-
-@app.get("/query")
-def query_page():
-    return render_template("index.html")
 
 
 @app.post("/api/costs/query")
