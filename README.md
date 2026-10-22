@@ -5,6 +5,7 @@
 ## 当前实现的主要功能
 
 - 单页 Web 界面：`/` 为查询页面入口。
+- 左侧导航工作台：支持在“Azure费用查询”和“OpenAI Tier查询”两个功能视图间切换。
 - 多组 Azure 凭据：支持保存多行 `APP_Client_ID`、`APP_Client_Secret`、`Tenant_ID`、`Tenant_Name` 和可选 `Subscription_ID`。
 - 跨租户/跨订阅查询：同一次查询可以处理多组认证配置，并合并成功返回的数据。
 - 订阅发现与可选订阅过滤：未填写 `Subscription_ID` 时查询当前服务主体可见的全部订阅；填写后只查询该订阅。
@@ -17,6 +18,7 @@
 - 认证配置导入/导出：支持 CSV 导入导出认证参数。
 - 本地缓存：认证参数、最近一次查询结果、主题偏好保存在浏览器 `localStorage`。
 - 深色/浅色主题切换：主题偏好保存在当前浏览器。
+- OpenAI Tier 查询：基于 Microsoft Entra 授权码登录，按当前登录用户可见的 Enabled 订阅查询 `quotaTiers` 信息，结果字段与 `check-quota-tiers.sh` 保持一致。
 - 日志记录：后端日志输出到控制台和 `logs/azure-cost-query.log`，日志文件滚动保留。
 
 ## 技术栈
@@ -24,13 +26,16 @@
 - 后端：Python、Flask、requests
 - 前端：Jinja2 模板、原生 HTML/CSS/JavaScript
 - 配置：服务端 `config/sync.config`，浏览器端 `localStorage`
+- 配置：服务端 `config/sync.config` 和项目根目录 `.env`，浏览器端 `localStorage`
 - Azure API：Microsoft Entra ID OAuth 2.0 Client Credentials、Azure Subscriptions API、Azure Cost Management Query API
 
 ## 目录结构
 
 ```text
 AzureSubCost/
-├── app.py                       # Flask 应用、Azure API 调用、成本聚合、CSV 导出
+├── main.py                      # Flask 应用、Azure API 调用、成本聚合、CSV 导出
+├── .env                         # 本地服务端配置（自动加载，不提交真实密钥）
+├── .env.example                 # .env 模板
 ├── README.md                    # 项目说明
 ├── requirements.txt             # Python 依赖
 ├── config/
@@ -55,6 +60,34 @@ AzureSubCost/
   - `https://management.azure.com`
 - Azure 应用注册/服务主体具备目标订阅的读取和 Cost Management 查询权限。
 
+### OpenAI Tier 查询额外配置
+
+服务端需要配置 Microsoft Entra 应用注册，用于浏览器登录并代表用户调用 Azure 管理面 API。
+
+必需配置写入项目根目录 `.env`：
+
+```dotenv
+FLASK_SECRET_KEY=replace-with-a-random-secret
+OPENAI_TIER_CLIENT_ID=your-app-client-id
+OPENAI_TIER_CLIENT_SECRET=your-app-client-secret
+OPENAI_TIER_AUTHORITY=https://login.microsoftonline.com/organizations
+```
+
+可选环境变量：
+
+```dotenv
+OPENAI_TIER_REDIRECT_URI=http://localhost:5100/auth/openai/callback
+OPENAI_TIER_API_VERSION=2026-01-15-preview
+```
+
+项目已内置 `.env` 自动加载逻辑。启动前直接编辑根目录 `.env` 即可；如果要重置模板，可参考 `.env.example`。
+
+应用注册需要：
+
+- Web 重定向 URI 指向 `/auth/openai/callback`
+- 已添加 Azure Service Management 的委托权限 `user_impersonation`
+- 用户或管理员已完成同意
+
 ## 安装与启动
 
 - 创建并激活虚拟环境：
@@ -70,11 +103,15 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+- 编辑根目录 `.env`，填入你自己的 Microsoft Entra 应用配置。
+
 - 启动服务：
 
 ```powershell
-python app.py
+python main.py
 ```
+
+Flask 应用入口文件为 `main.py`，WSGI 导入目标为 `main:app`（即 `from main import app`）。正常导入 `main` 会注册 Azure Diagnostics 路由，无需额外调用路由注册函数。
 
 - 打开页面：
 
@@ -224,6 +261,36 @@ detail query: granularity = Daily，grouping = ResourceId / ResourceLocation / S
 
 ## API 说明
 
+### `GET /api/azure-diagnostics/resources`
+
+所有模式均要求有效的 Microsoft 登录，并重新校验所选订阅的当前访问权限。`subscriptionIds` 为可重复的查询参数，也兼容 `subscriptionId`；最多 100 项，规范化并去重。
+
+| `phase` | 请求参数 | 响应 `resources` |
+| --- | --- | --- |
+| 不传或 `full` | 所选订阅 | 保持原完整账号与诊断字段，无新增顶层字段。 |
+| `accounts` | 所选订阅 | 仅读取 OpenAI/AIServices 账号，跳过诊断设置；`diagnosticStatus=pending`，日志开关和工作区字段为 `null`，分类列表为空。 |
+| `diagnostics` | 所选订阅及可重复的 `resourceIds` | 仅读取指定账号的诊断设置；返回 `id` 与原诊断字段，不重新读取账号列表。 |
+
+两阶段接入时先请求 `phase=accounts` 展示账号，再将返回的 ID 分批（每批 1–100 项）传给 `phase=diagnostics`，按 `id` 合并结果。第二阶段校验所有 ID 的格式、账号资源类型及所选订阅归属后才调度请求；它不依赖第一阶段缓存，资源读取权限仍由 ARM 校验。未查询的 `pending` 不代表诊断日志关闭；诊断设置读取返回 401/403 时仍为 `unknown`，429 原样传递，其余上游错误为 502，不返回上游敏感内容。
+
+工作区发现、账号发现和诊断设置使用有界调度：单个请求的活动任务及待完成任务最多为 `min(max(1, max_workers), 8)`。每个工作线程独占并复用 HTTP Session，分页和后续任务沿用连接；完整模式在账号与诊断阶段间复用同一线程池。请求结束或失败后等待在途任务并关闭所有 Session，不在用户、请求之间共享认证会话。列表仍按资源 ID 排序，分页地址、版本和页数限制保持不变。当前 JS 未接入两阶段模式，继续使用默认完整响应。
+
+### `POST /api/azure-diagnostics/query`
+
+查询 `AzureDiagnostics`，保留时间范围及 `MICROSOFT.COGNITIVESERVICES` 提供商限制，不再限制 `Category` 为 `AzureOpenAIRequestUsage`，也不按 `RequestId` 执行 `summarize arg_max` 去重。同一 ID 的不同操作、不同 IP 以及重复日志均独立返回；原始字段的值、空字符串、`null` 和 `ResourceId` / `_ResourceId` 大小写不被资源过滤覆盖。
+
+资源过滤使用内部 `_ResourceIdFilter`（优先读取 `_ResourceId`，列不存在时读取 `ResourceId`），以不区分大小写的方式限定所选订阅及可选资源。查询通过 `project-away p, _ResourceIdFilter` 移除内部字段，其余原始列及现有 Token、模型、操作、关联 ID、请求 ID 计算字段保留，计算口径不变。
+
+有效 Microsoft 登录、当前订阅权限、工作区及资源类型/订阅归属校验保持不变；日期及时区校验、最多 31 天、未来结束时间限制及 UTC 时间过滤保持不变。明细按时间倒序返回，每个工作区最多 5000 条（查询 5001 条用于检测截断），截断及跨工作区重复提示保持不变。与 Portal 对照时仍需使用相同工作区、时间和资源范围，并注意明细截断。
+
+离线回归（屏蔽 `.env` 读取及网络连接，认证和 ARM 响应均模拟；断言无 Category 过滤/RequestId 去重、资源过滤不覆盖原始 ID、内部字段不外泄，同 ID 不同操作/IP 及原值/空值全部保留，并覆盖计算字段、权限、时间和明细上限）：
+
+```powershell
+python tests/run_offline.py
+```
+
+包含独立进程中的入口路由注册烟雾测试：正常导入 `main`，不手动注册路由、不模拟认证函数；使用虚拟登录配置但不设置登录会话，验证页面及认证状态接口返回 `200`，诊断工作区、资源 GET 和查询 POST 返回 `401` JSON，而不是 `404`。测试屏蔽 `.env` 读取和网络连接，不验证线上部署状态。
+
 ### `POST /api/costs/query`
 
 查询 Azure 成本。前端以 `authList` 传递多组认证参数；后端也兼容单个 `auth` 参数。
@@ -345,11 +412,13 @@ detail query: granularity = Daily，grouping = ResourceId / ResourceLocation / S
 ## 验证命令
 
 ```powershell
-python -m py_compile app.py
-python -c "from app import app; c=app.test_client(); print('/', c.get('/').status_code); print('/favicon.ico', c.get('/favicon.ico').status_code)"
+python -m py_compile main.py
+python tests/run_offline.py
 ```
 
 期望结果：
 
 - `/` 返回 `200`
 - `/favicon.ico` 返回 `204`
+- 无登录会话且登录配置完整时，`/api/openai-tier/auth/status` 返回 `200`、`signedIn=false`
+- 同样条件下，`GET /api/azure-diagnostics/workspaces`、`GET /api/azure-diagnostics/resources` 和 `POST /api/azure-diagnostics/query` 均返回 `401` JSON，不是 `404`

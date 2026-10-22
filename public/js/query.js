@@ -1,14 +1,29 @@
-const startDateEl = document.getElementById("startDate");
-const endDateEl = document.getElementById("endDate");
-const customRangeRowEl = document.getElementById("customRangeRow");
-const presetBtns = Array.from(document.querySelectorAll(".query-preset-btn"));
+const customMonthRowEl = document.getElementById("customMonthRow");
+const dateDimensionRowEl = document.getElementById("dateDimensionRow");
+const queryDateEl = document.getElementById("queryDate");
+const monthPresetGroupEl = document.getElementById("monthPresetGroup");
+const customYearEl = document.getElementById("customYear");
+const customMonthEl = document.getElementById("customMonth");
+const timeDimensionBtns = Array.from(document.querySelectorAll(".query-time-dimension-btn"));
+const presetBtns = Array.from(document.querySelectorAll(".single-month-preset"));
 const queryBtn = document.getElementById("queryBtn");
-const downloadSubscriptionBtn = document.getElementById("downloadSubscriptionBtn");
-const downloadDailyBtn = document.getElementById("downloadDailyBtn");
-const downloadResourceTypeBtn = document.getElementById("downloadResourceTypeBtn");
-const downloadDateBtn = document.getElementById("downloadDateBtn");
+const downloadSubscriptionBtn = document.getElementById("downloadMonthlyBtn");
 const cacheInfoEl = document.getElementById("cacheInfo");
-const dimensionTabsEl = document.getElementById("dimensionTabs");
+const singleTenantLoginBtn = document.getElementById("singleTenantLoginBtn");
+const singleTenantLogoutBtn = document.getElementById("singleTenantLogoutBtn");
+const singleTenantRefreshBtn = document.getElementById("singleTenantRefreshBtn");
+const singleTenantAuthControlsEl = document.getElementById("singleTenantAuthControls");
+const singleTenantSubscriptionFieldEl = document.getElementById("singleTenantSubscriptionField");
+const singleTenantSubscriptionSearchEl = document.getElementById("singleTenantSubscriptionSearch");
+const singleTenantSubscriptionToggleBtn = document.getElementById("singleTenantSubscriptionToggleBtn");
+const singleTenantSubscriptionOptionsEl = document.getElementById("singleTenantSubscriptionOptions");
+const singleTenantSubscriptionOptionListEl = document.getElementById("singleTenantSubscriptionOptionList");
+const singleTenantSubscriptionSelectionMetaEl = document.getElementById("singleTenantSubscriptionSelectionMeta");
+const singleTenantSubscriptionSelectAllBtn = document.getElementById("singleTenantSubscriptionSelectAllBtn");
+const singleTenantSubscriptionClearAllBtn = document.getElementById("singleTenantSubscriptionClearAllBtn");
+const singleTenantSubscriptionErrorEl = document.getElementById("singleTenantSubscriptionError");
+const singleTenantSubscriptionRetryBtn = document.getElementById("singleTenantSubscriptionRetryBtn");
+const queryTimeRangeTitleEl = document.getElementById("queryTimeRangeTitle");
 const themeToggleBtn = document.getElementById("themeToggleBtn");
 const themeToggleLightIcon = document.getElementById("themeToggleLightIcon");
 const themeToggleDarkIcon = document.getElementById("themeToggleDarkIcon");
@@ -29,15 +44,30 @@ let authTableRows = [];
 const summaryGridEl = document.getElementById("summaryGrid");
 const subscriptionTableWrapEl = document.getElementById("subscriptionTableWrap");
 const dailyTableWrapEl = document.getElementById("dailyTableWrap");
-const resourceTypeTableWrapEl = document.getElementById("resourceTypeTableWrap");
-const dateTableWrapEl = document.getElementById("dateTableWrap");
 const dimensionPanels = Array.from(document.querySelectorAll("[data-dimension-panel]"));
+const queryErrorTableWrapEl = document.getElementById("queryErrorTableWrap");
+const queryErrorTableBodyEl = document.getElementById("queryErrorTableBody");
+const queryErrorTitleEl = document.getElementById("queryErrorTitle");
 
 let currentResult = null;
 const QUERY_CACHE_KEY = "azure-cost-analyzer-query-cache-v1";
+const SINGLE_TENANT_QUERY_CACHE_HISTORY_KEY = "azure-cost-analyzer-single-tenant-query-cache-v1";
+const QUERY_COST_MODE_STORAGE_KEY = "azure-query-cost-mode-v1";
 const DEFAULT_COST_FILTER_VALUES = [">0"];
-let activeDimension = "subscription";
+let activeDimension = "monthly";
 let currentRangeText = "-";
+let activeSingleTenantTimeDimension = "month";
+let singleTenantAuthState = {
+  configured: false,
+  signedIn: false,
+  loginUrlApi: "/api/openai-tier/auth/login-url",
+  logoutUrl: "/auth/openai/logout",
+  account: null
+};
+let singleTenantSubscriptions = [];
+let singleTenantSubscriptionsLoaded = false;
+let singleTenantSubscriptionsLoading = false;
+let selectedSingleTenantSubscriptionIds = [];
 let subscriptionFilters = {
   openColumn: "",
   tenantName: {
@@ -76,20 +106,469 @@ const dimensionFilterEventsBound = {
 
 init();
 
+window.addEventListener("cost-mode-change", (event) => {
+  const nextMode = String(event.detail && event.detail.costMode ? event.detail.costMode : "multi");
+  applyCostModeUI(nextMode);
+  loadCachedResult();
+});
+
 function init() {
   initThemeToggle();
   initPresetButtons();
+  initSingleTenantTimeControls();
+  initSingleTenantAuthControls();
+  applyCostModeUI(getCurrentCostMode());
 
   renderSummary(null);
   renderSubscriptionTable(subscriptionTableWrapEl, []);
   renderTable(dailyTableWrapEl, getDailyColumns(), [], { dimensionKey: "daily", enableFilters: true });
-  renderTable(resourceTypeTableWrapEl, getResourceColumns(), [], { dimensionKey: "resourceType", enableFilters: true });
-  renderTable(dateTableWrapEl, getDateColumns(), [], { dimensionKey: "date", enableFilters: true });
   initDimensionTabs();
   switchDimensionPanel(activeDimension);
   initSettingsModal();
 
   loadCachedResult();
+}
+
+function getCurrentCostMode() {
+  if (document.body && document.body.dataset.costMode === "single") {
+    return "single";
+  }
+
+  return localStorage.getItem(QUERY_COST_MODE_STORAGE_KEY) === "single" ? "single" : "multi";
+}
+
+function isSingleTenantCostMode() {
+  return getCurrentCostMode() === "single";
+}
+
+function getQueryCacheKey() {
+  return `${QUERY_CACHE_KEY}-${getCurrentCostMode()}`;
+}
+
+function applyCostModeUI(mode) {
+  const normalizedMode = mode === "single" ? "single" : "multi";
+  if (document.body) {
+    document.body.dataset.costMode = normalizedMode;
+  }
+
+  if (openSettingsBtn) {
+    openSettingsBtn.hidden = normalizedMode === "single";
+  }
+
+  if (singleTenantAuthControlsEl) {
+    singleTenantAuthControlsEl.hidden = normalizedMode !== "single";
+  }
+
+  if (customMonthRowEl) {
+    customMonthRowEl.hidden = activeSingleTenantTimeDimension !== "month";
+  }
+  if (monthPresetGroupEl) {
+    monthPresetGroupEl.hidden = activeSingleTenantTimeDimension !== "month";
+  }
+  if (dateDimensionRowEl) {
+    dateDimensionRowEl.hidden = activeSingleTenantTimeDimension !== "date";
+  }
+  if (normalizedMode !== "single" && queryErrorTableWrapEl && queryErrorTableBodyEl) {
+    queryErrorTableWrapEl.hidden = true;
+    queryErrorTableBodyEl.replaceChildren();
+  }
+  syncCostDimensionPanels();
+
+  localStorage.setItem(QUERY_COST_MODE_STORAGE_KEY, normalizedMode);
+
+  if (normalizedMode === "single") {
+    refreshSingleTenantAuthStatus().catch((error) => {
+      setCacheInfo(error.message || "读取单租户登录状态失败", true);
+    });
+  } else {
+    updateSingleTenantAuthButtons();
+  }
+
+  updateSingleTenantAuthButtons();
+  updateSingleTenantSubscriptionUI();
+}
+
+function initSingleTenantAuthControls() {
+  if (singleTenantLoginBtn) {
+    singleTenantLoginBtn.addEventListener("click", () => {
+      startSingleTenantLogin().catch((error) => {
+        setCacheInfo(error.message || "跳转 Microsoft 登录页失败", true);
+      });
+    });
+  }
+
+  if (singleTenantLogoutBtn) {
+    singleTenantLogoutBtn.addEventListener("click", () => {
+      if (singleTenantAuthState.logoutUrl) {
+        window.location.href = singleTenantAuthState.logoutUrl;
+      }
+    });
+  }
+
+  if (singleTenantRefreshBtn) {
+    singleTenantRefreshBtn.addEventListener("click", async () => {
+      await refreshSingleTenantAuthStatus();
+    });
+  }
+
+  if (singleTenantSubscriptionSearchEl) {
+    singleTenantSubscriptionSearchEl.addEventListener("input", renderSingleTenantSubscriptionOptions);
+    singleTenantSubscriptionSearchEl.addEventListener("focus", openSingleTenantSubscriptionOptions);
+  }
+
+  if (singleTenantSubscriptionToggleBtn) {
+    singleTenantSubscriptionToggleBtn.addEventListener("click", () => {
+      if (singleTenantSubscriptionOptionsEl && singleTenantSubscriptionOptionsEl.hidden) {
+        openSingleTenantSubscriptionOptions();
+      } else {
+        closeSingleTenantSubscriptionOptions();
+      }
+    });
+  }
+
+  if (singleTenantSubscriptionSelectAllBtn) {
+    singleTenantSubscriptionSelectAllBtn.addEventListener("click", () => {
+      selectedSingleTenantSubscriptionIds = singleTenantSubscriptions
+        .map((subscription) => subscription.subscriptionId);
+      setSingleTenantSubscriptionError("");
+      updateSingleTenantSubscriptionPicker("搜索订阅...", false);
+      renderSingleTenantSubscriptionOptions();
+      updateSingleTenantAuthButtons();
+    });
+  }
+
+  if (singleTenantSubscriptionClearAllBtn) {
+    singleTenantSubscriptionClearAllBtn.addEventListener("click", () => {
+      selectedSingleTenantSubscriptionIds = [];
+      setSingleTenantSubscriptionError("");
+      updateSingleTenantSubscriptionPicker("搜索订阅...", false);
+      renderSingleTenantSubscriptionOptions();
+      updateSingleTenantAuthButtons();
+    });
+  }
+
+  if (singleTenantSubscriptionRetryBtn) {
+    singleTenantSubscriptionRetryBtn.addEventListener("click", () => {
+      loadSingleTenantSubscriptions({ force: true }).catch(() => {});
+    });
+  }
+
+  document.addEventListener("click", (event) => {
+    if (!singleTenantSubscriptionOptionsEl || singleTenantSubscriptionOptionsEl.hidden) {
+      return;
+    }
+    if (singleTenantSubscriptionFieldEl && singleTenantSubscriptionFieldEl.contains(event.target)) {
+      return;
+    }
+    closeSingleTenantSubscriptionOptions();
+  });
+}
+
+async function refreshSingleTenantAuthStatus() {
+  if (!isSingleTenantCostMode()) {
+    return;
+  }
+
+  const response = await fetch("/api/openai-tier/auth/status");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || "读取登录状态失败");
+  }
+
+  singleTenantAuthState.configured = Boolean(data.configured);
+  singleTenantAuthState.signedIn = Boolean(data.signedIn);
+  singleTenantAuthState.loginUrlApi = data.loginUrlApi || "/api/openai-tier/auth/login-url";
+  singleTenantAuthState.logoutUrl = data.logoutUrl || "/auth/openai/logout";
+  singleTenantAuthState.account = data.account || null;
+
+  updateSingleTenantAuthButtons();
+
+  if (!singleTenantAuthState.configured) {
+    resetSingleTenantSubscriptions();
+    setCacheInfo("未配置 Microsoft 登录参数，请先在服务端设置 OPENAI_TIER_* 环境变量。", true);
+    return;
+  }
+
+  if (data.notice && data.notice.message) {
+    setCacheInfo(data.notice.message, Boolean(data.notice.isError));
+  }
+
+  if (singleTenantAuthState.signedIn) {
+    const accountName = formatSingleTenantAccountName(singleTenantAuthState.account);
+    if (!data.notice || !data.notice.message) {
+      setCacheInfo(`当前已登录：${accountName}`);
+    }
+    await loadSingleTenantSubscriptions();
+  } else {
+    resetSingleTenantSubscriptions();
+    setCacheInfo("请先通过Entra ID账号登录，然后再查询单租户费用。", true);
+  }
+}
+
+async function startSingleTenantLogin() {
+  if (!isSingleTenantCostMode()) {
+    return;
+  }
+
+  if (!singleTenantAuthState.configured) {
+    throw new Error("服务端尚未配置Entra ID登录参数");
+  }
+
+  if (singleTenantAuthState.signedIn) {
+    return;
+  }
+
+  const baseUrl = singleTenantAuthState.loginUrlApi || "/api/openai-tier/auth/login-url";
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  const response = await fetch(`${baseUrl}${separator}source=single-tenant-cost`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || "生成 Microsoft 登录地址失败");
+  }
+
+  const authUrl = String(data.authUrl || "").trim();
+  if (!authUrl) {
+    throw new Error("Microsoft 登录地址为空");
+  }
+
+  window.location.href = authUrl;
+}
+
+function updateSingleTenantAuthButtons() {
+  const isSingleMode = isSingleTenantCostMode();
+  if (singleTenantLoginBtn) {
+    singleTenantLoginBtn.disabled = !isSingleMode || !singleTenantAuthState.configured || singleTenantAuthState.signedIn;
+  }
+  if (singleTenantLogoutBtn) {
+    singleTenantLogoutBtn.disabled = !isSingleMode || !singleTenantAuthState.signedIn;
+  }
+  if (singleTenantRefreshBtn) {
+    singleTenantRefreshBtn.disabled = !isSingleMode || !singleTenantAuthState.signedIn;
+  }
+
+  if (queryBtn) {
+    queryBtn.disabled = isSingleMode
+      ? !singleTenantAuthState.signedIn || !singleTenantSubscriptionsLoaded || getSelectedSingleTenantSubscriptionIds().length === 0
+      : false;
+  }
+}
+
+function updateSingleTenantSubscriptionUI() {
+  const isSingleMode = isSingleTenantCostMode();
+  if (singleTenantSubscriptionFieldEl) {
+    singleTenantSubscriptionFieldEl.hidden = !isSingleMode;
+  }
+  if (!isSingleMode) {
+    closeSingleTenantSubscriptionOptions();
+  }
+}
+
+function resetSingleTenantSubscriptions() {
+  singleTenantSubscriptions = [];
+  singleTenantSubscriptionsLoaded = false;
+  singleTenantSubscriptionsLoading = false;
+  selectedSingleTenantSubscriptionIds = [];
+  renderSingleTenantSubscriptionOptions();
+  updateSingleTenantSubscriptionPicker("请先登录后加载订阅", true);
+  setSingleTenantSubscriptionError("");
+  if (singleTenantSubscriptionRetryBtn) {
+    singleTenantSubscriptionRetryBtn.hidden = true;
+  }
+  updateSingleTenantAuthButtons();
+}
+
+function renderSingleTenantSubscriptionOptions() {
+  if (!singleTenantSubscriptionOptionListEl) {
+    return;
+  }
+
+  if (!singleTenantAuthState.signedIn) {
+    renderSingleTenantSubscriptionEmptyState("请先登录后加载订阅列表");
+    return;
+  }
+
+  if (singleTenantSubscriptionsLoading) {
+    renderSingleTenantSubscriptionEmptyState("正在加载订阅列表...");
+    return;
+  }
+
+  if (!singleTenantSubscriptionsLoaded) {
+    renderSingleTenantSubscriptionEmptyState("订阅列表加载失败，请刷新重试");
+    return;
+  }
+
+  const searchText = String(singleTenantSubscriptionSearchEl ? singleTenantSubscriptionSearchEl.value : "").trim().toLowerCase();
+  const visibleSubscriptions = singleTenantSubscriptions.filter((subscription) => (
+    subscription.subscriptionName.toLowerCase().includes(searchText)
+    || subscription.subscriptionId.toLowerCase().includes(searchText)
+  ));
+  singleTenantSubscriptionOptionListEl.replaceChildren();
+  if (visibleSubscriptions.length === 0) {
+    renderSingleTenantSubscriptionEmptyState("未找到匹配的订阅");
+  } else {
+    visibleSubscriptions.forEach((subscription) => {
+    const option = document.createElement("label");
+    option.className = "tier-subscription-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = subscription.subscriptionId;
+    checkbox.checked = selectedSingleTenantSubscriptionIds.includes(subscription.subscriptionId);
+    checkbox.addEventListener("change", () => updateSelectedSingleTenantSubscriptions(subscription.subscriptionId, checkbox.checked));
+    const label = document.createElement("span");
+    label.className = "tier-subscription-option-text";
+    label.textContent = `${subscription.subscriptionName} / ${subscription.subscriptionId}`;
+    option.append(checkbox, label);
+      singleTenantSubscriptionOptionListEl.append(option);
+    });
+  }
+  updateSingleTenantSubscriptionPicker("搜索订阅...", !singleTenantSubscriptionsLoaded || singleTenantSubscriptionsLoading);
+}
+
+function renderSingleTenantSubscriptionEmptyState(message) {
+  if (!singleTenantSubscriptionOptionListEl) {
+    return;
+  }
+  const empty = document.createElement("p");
+  empty.className = "tier-picker-empty";
+  empty.textContent = message;
+  singleTenantSubscriptionOptionListEl.replaceChildren(empty);
+}
+
+function updateSingleTenantSubscriptionPicker(placeholder, disabled) {
+  if (singleTenantSubscriptionSearchEl) {
+    singleTenantSubscriptionSearchEl.placeholder = placeholder;
+    singleTenantSubscriptionSearchEl.disabled = disabled;
+    if (disabled) {
+      singleTenantSubscriptionSearchEl.value = "";
+    }
+  }
+  if (singleTenantSubscriptionToggleBtn) {
+    singleTenantSubscriptionToggleBtn.disabled = disabled;
+    singleTenantSubscriptionToggleBtn.textContent = disabled ? "已选 0 / 0 个订阅" : getSingleTenantSubscriptionSelectionText();
+  }
+  if (singleTenantSubscriptionSelectionMetaEl) {
+    singleTenantSubscriptionSelectionMetaEl.textContent = disabled
+      ? "已选择 0 / 0 个订阅"
+      : `已选择 ${selectedSingleTenantSubscriptionIds.length} / ${singleTenantSubscriptions.length} 个订阅`;
+  }
+  if (singleTenantSubscriptionSelectAllBtn) {
+    singleTenantSubscriptionSelectAllBtn.disabled = disabled;
+  }
+  if (singleTenantSubscriptionClearAllBtn) {
+    singleTenantSubscriptionClearAllBtn.disabled = disabled;
+  }
+}
+
+function updateSelectedSingleTenantSubscriptions(subscriptionId, isSelected) {
+  if (isSelected) {
+    selectedSingleTenantSubscriptionIds = selectedSingleTenantSubscriptionIds.includes(subscriptionId)
+      ? selectedSingleTenantSubscriptionIds
+      : [...selectedSingleTenantSubscriptionIds, subscriptionId];
+  } else {
+    selectedSingleTenantSubscriptionIds = selectedSingleTenantSubscriptionIds.filter((id) => id !== subscriptionId);
+  }
+  setSingleTenantSubscriptionError("");
+  updateSingleTenantSubscriptionPicker("搜索订阅", false);
+  renderSingleTenantSubscriptionOptions();
+  updateSingleTenantAuthButtons();
+}
+
+function getSingleTenantSubscriptionSelectionText() {
+  const selectedCount = selectedSingleTenantSubscriptionIds.length;
+  return `已选 ${selectedCount} / ${singleTenantSubscriptions.length} 个订阅`;
+}
+
+function openSingleTenantSubscriptionOptions() {
+  if (!singleTenantSubscriptionsLoaded || !singleTenantSubscriptionOptionsEl) {
+    return;
+  }
+  renderSingleTenantSubscriptionOptions();
+  singleTenantSubscriptionOptionsEl.hidden = false;
+  if (singleTenantSubscriptionToggleBtn) {
+    singleTenantSubscriptionToggleBtn.setAttribute("aria-expanded", "true");
+  }
+}
+
+function closeSingleTenantSubscriptionOptions() {
+  if (singleTenantSubscriptionOptionsEl) {
+    singleTenantSubscriptionOptionsEl.hidden = true;
+  }
+  if (singleTenantSubscriptionToggleBtn) {
+    singleTenantSubscriptionToggleBtn.setAttribute("aria-expanded", "false");
+  }
+}
+
+async function loadSingleTenantSubscriptions({ force = false } = {}) {
+  if (!isSingleTenantCostMode() || !singleTenantAuthState.signedIn) {
+    return;
+  }
+  if (singleTenantSubscriptionsLoaded && !force) {
+    return;
+  }
+  if (singleTenantSubscriptionsLoading) {
+    return;
+  }
+
+  singleTenantSubscriptionsLoading = true;
+  singleTenantSubscriptionsLoaded = false;
+  selectedSingleTenantSubscriptionIds = [];
+  closeSingleTenantSubscriptionOptions();
+  renderSingleTenantSubscriptionOptions();
+  updateSingleTenantSubscriptionPicker("正在加载订阅...", true);
+  setSingleTenantSubscriptionError("");
+  if (singleTenantSubscriptionRetryBtn) {
+    singleTenantSubscriptionRetryBtn.hidden = true;
+  }
+  updateSingleTenantAuthButtons();
+
+  try {
+    const response = await fetch("/api/openai-tier/subscriptions");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || "订阅列表加载失败");
+    }
+    const subscriptions = Array.isArray(data.subscriptions) ? data.subscriptions : [];
+    singleTenantSubscriptions = subscriptions.filter((item) => item && item.subscriptionId && item.subscriptionName);
+    if (singleTenantSubscriptions.length === 0) {
+      throw new Error("当前租户下未找到有效订阅");
+    }
+    singleTenantSubscriptionsLoaded = true;
+    selectedSingleTenantSubscriptionIds = [singleTenantSubscriptions[0].subscriptionId];
+    updateSingleTenantSubscriptionPicker("搜索订阅", false);
+    renderSingleTenantSubscriptionOptions();
+  } catch (error) {
+    singleTenantSubscriptions = [];
+    renderSingleTenantSubscriptionOptions();
+    updateSingleTenantSubscriptionPicker("订阅加载失败", true);
+    setSingleTenantSubscriptionError(error.message || "订阅列表加载失败，请重试");
+    if (singleTenantSubscriptionRetryBtn) {
+      singleTenantSubscriptionRetryBtn.hidden = false;
+    }
+    setCacheInfo(error.message || "订阅列表加载失败，请重试", true);
+  } finally {
+    singleTenantSubscriptionsLoading = false;
+    updateSingleTenantAuthButtons();
+  }
+}
+
+function getSelectedSingleTenantSubscriptionIds() {
+  return selectedSingleTenantSubscriptionIds;
+}
+
+function setSingleTenantSubscriptionError(message) {
+  if (singleTenantSubscriptionErrorEl) {
+    singleTenantSubscriptionErrorEl.textContent = message;
+  }
+}
+
+function formatSingleTenantAccountName(account) {
+  if (!account || typeof account !== "object") {
+    return "-";
+  }
+
+  const name = String(account.name || "").trim();
+  const username = String(account.preferredUsername || "").trim();
+  return username || name || "-";
 }
 
 function initThemeToggle() {
@@ -122,13 +601,17 @@ function applyTheme(theme) {
 }
 
 async function runQuery() {
+  if (isSingleTenantCostMode()) {
+    await runSingleTenantQuery();
+    return;
+  }
+
   const originalText = queryBtn.textContent;
   try {
     queryBtn.disabled = true;
     queryBtn.textContent = "查询中...";
 
-    const startDate = startDateEl.value;
-    const endDate = endDateEl.value;
+    const { startDate, endDate } = getSelectedQueryDates();
     validateDates(startDate, endDate);
 
     const authConfigs = loadAuthConfigs();
@@ -152,7 +635,7 @@ async function runQuery() {
 
     setCacheInfo("正在查询数据，请耐心等待！", false, true);
 
-    const response = await fetch("/api/costs/query", {
+    const response = await fetch("/api/costs/query?async=1", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -170,19 +653,20 @@ async function runQuery() {
       })
     });
 
-    if (!response.ok) {
+    if (response.status === 202) {
+      const queued = await response.json();
+      currentResult = await waitForMultiCostQuery(queued.jobId);
+    } else if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.message || "查询失败");
+    } else {
+      currentResult = await response.json();
     }
-
-    currentResult = await response.json();
-    currentRangeText = `${startDate} ~ ${endDate}`;
+    currentRangeText = formatCostQueryRangeText(startDate, endDate);
 
     renderSummary(currentResult);
     renderSubscriptionTable(subscriptionTableWrapEl, currentResult.bySubscription || []);
     renderTable(dailyTableWrapEl, getDailyColumns(), getDailyRows(currentResult), { dimensionKey: "daily", enableFilters: true });
-    renderTable(resourceTypeTableWrapEl, getResourceColumns(), currentResult.byResourceType || [], { dimensionKey: "resourceType", enableFilters: true });
-    renderTable(dateTableWrapEl, getDateColumns(), currentResult.byDate || [], { dimensionKey: "date", enableFilters: true });
 
     const warnings = Array.isArray(currentResult.warnings) ? currentResult.warnings : [];
     const authWarnings = Array.isArray(currentResult.authWarnings) ? currentResult.authWarnings : [];
@@ -211,24 +695,282 @@ async function runQuery() {
   }
 }
 
+async function waitForMultiCostQuery(jobId) {
+  if (!jobId) {
+    throw new Error("查询任务创建失败");
+  }
+
+  while (true) {
+    const response = await fetch(`/api/costs/query/jobs/${encodeURIComponent(jobId)}`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || "读取查询任务状态失败");
+    }
+    if (data.status === "succeeded") {
+      return data.result || {};
+    }
+    if (data.status === "failed") {
+      throw new Error(data.error || "多租户费用查询失败");
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  }
+}
+
+async function waitForSingleTenantCostQuery(jobId) {
+  if (!jobId) {
+    throw new Error("查询任务创建失败");
+  }
+
+  while (true) {
+    const response = await fetch(`/api/single-tenant/query/jobs/${encodeURIComponent(jobId)}`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || "读取查询任务状态失败");
+    }
+    if (data.status === "succeeded") {
+      return data.result || {};
+    }
+    if (data.status === "failed") {
+      throw new Error(data.error || "单租户费用查询失败");
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  }
+}
+
+async function runSingleTenantQuery() {
+  if (!singleTenantAuthState.signedIn) {
+    setCacheInfo("请先通过Entra ID账号登录，然后再查询。", true);
+    return;
+  }
+
+  const subscriptionIds = getSelectedSingleTenantSubscriptionIds();
+  if (!singleTenantSubscriptionsLoaded) {
+    setSingleTenantSubscriptionError("订阅列表尚未加载完成，请稍后重试");
+    return;
+  }
+  if (subscriptionIds.length === 0) {
+    setSingleTenantSubscriptionError("请选择订阅后再查询");
+    return;
+  }
+
+  const originalText = queryBtn.textContent;
+  try {
+    queryBtn.disabled = true;
+    queryBtn.textContent = "查询中...";
+
+    refreshSingleTenantMonthPresetBeforeQuery();
+    const { startDate, endDate } = getSelectedSingleTenantQueryDates();
+    validateDates(startDate, endDate);
+
+    setCacheInfo("正在查询数据，请耐心等待！", false, true);
+
+    const response = await fetch("/api/single-tenant/query?async=1", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        startDate,
+        endDate,
+        subscriptionIds
+      })
+    });
+
+    if (response.status === 202) {
+      const queued = await response.json();
+      currentResult = await waitForSingleTenantCostQuery(queued.jobId);
+    } else if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.message || "查询失败");
+    } else {
+      currentResult = await response.json();
+    }
+    currentRangeText = formatCostQueryRangeText(startDate, endDate);
+
+    renderFailedSubscriptionsTable([], currentResult.warnings || []);
+
+    renderSummary(currentResult);
+    renderSubscriptionTable(subscriptionTableWrapEl, currentResult.bySubscription || []);
+    renderTable(dailyTableWrapEl, getDailyColumns(), getDailyRows(currentResult), { dimensionKey: "daily", enableFilters: true });
+
+    const warnings = Array.isArray(currentResult.warnings) ? currentResult.warnings : [];
+    if (warnings.length > 0) {
+      const hasThrottleWarning = warnings.some((message) => String(message || "").includes("限流"));
+      if (hasThrottleWarning) {
+        setCacheInfo(`查询完成，但部分时间段触发限流，结果可能不完整：${warnings.join("；")}`, true);
+      } else {
+        setCacheInfo(`查询完成（部分认证/订阅异常）：${warnings.join("；")}`, true);
+      }
+    }
+
+    saveQueryCache({
+      startDate,
+      endDate,
+      result: currentResult,
+      cachedAt: new Date().toISOString()
+    });
+    setCacheInfo(`当前查询结果已缓存，缓存时间: ${formatLocalDateTime(new Date().toISOString())}`);
+  } catch (error) {
+    setCacheInfo(error.message || "查询失败", true);
+  } finally {
+    queryBtn.disabled = false;
+    queryBtn.textContent = originalText;
+  }
+}
+
+function initSingleTenantTimeControls() {
+  populateSingleTenantMonthSelectors();
+  populateSingleTenantDateSelector();
+
+  timeDimensionBtns.forEach((button) => {
+    button.addEventListener("click", () => {
+      activeSingleTenantTimeDimension = button.dataset.timeDimension === "date" ? "date" : "month";
+      timeDimensionBtns.forEach((item) => {
+        const active = item === button;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      applyCostModeUI(getCurrentCostMode());
+      if (isSingleTenantCostMode()) {
+        loadCachedResult();
+      }
+    });
+  });
+
+  document.querySelectorAll(".single-month-preset").forEach((button) => {
+    button.addEventListener("click", () => {
+      applySingleTenantMonthPreset(button.dataset.preset || "this-month");
+      document.querySelectorAll(".single-month-preset").forEach((item) => item.classList.toggle("active", item === button));
+    });
+  });
+
+  customYearEl?.addEventListener("change", () => {
+    activeSingleTenantTimeDimension = "month";
+    populateSingleTenantMonthOptions();
+    syncCostDimensionPanels();
+    if (isSingleTenantCostMode()) loadCachedResult();
+  });
+  customMonthEl?.addEventListener("change", () => {
+    activeSingleTenantTimeDimension = "month";
+    syncCostDimensionPanels();
+    if (isSingleTenantCostMode()) loadCachedResult();
+  });
+  queryDateEl?.addEventListener("change", () => {
+    activeSingleTenantTimeDimension = "date";
+    syncCostDimensionPanels();
+    if (isSingleTenantCostMode()) loadCachedResult();
+  });
+}
+
+function populateSingleTenantMonthSelectors() {
+  if (!customYearEl || !customMonthEl) return;
+  const today = new Date();
+  customYearEl.replaceChildren();
+  for (let year = today.getFullYear() - 2; year <= today.getFullYear(); year += 1) {
+    const option = new Option(String(year), String(year));
+    option.selected = year === today.getFullYear();
+    customYearEl.append(option);
+  }
+  populateSingleTenantMonthOptions();
+}
+
+function populateSingleTenantMonthOptions() {
+  if (!customYearEl || !customMonthEl) return;
+  const today = new Date();
+  const selectedYear = Number(customYearEl.value);
+  const maxMonth = selectedYear === today.getFullYear() ? today.getMonth() + 1 : 12;
+  const previousMonth = customMonthEl.value;
+  const selectedMonth = previousMonth && Number(previousMonth) <= maxMonth
+    ? Number(previousMonth)
+    : maxMonth;
+  customMonthEl.replaceChildren();
+  for (let month = 1; month <= maxMonth; month += 1) {
+    const option = new Option(`${month}月`, String(month).padStart(2, "0"));
+    option.selected = month === selectedMonth;
+    customMonthEl.append(option);
+  }
+}
+
+function populateSingleTenantDateSelector() {
+  if (!queryDateEl) return;
+  const today = new Date();
+  queryDateEl.replaceChildren();
+  for (let offset = 0; offset < 31; offset += 1) {
+    const date = new Date(today);
+    date.setDate(today.getDate() - offset);
+    const value = formatDate(date);
+    queryDateEl.append(new Option(value, value));
+  }
+}
+
+function applySingleTenantMonthPreset(preset) {
+  const today = new Date();
+  const date = preset === "last-month"
+    ? new Date(today.getFullYear(), today.getMonth() - 1, 1)
+    : today;
+  if (customYearEl) customYearEl.value = String(date.getFullYear());
+  if (customMonthEl) customMonthEl.value = String(date.getMonth() + 1).padStart(2, "0");
+}
+
+function refreshSingleTenantMonthPresetBeforeQuery() {
+  if (activeSingleTenantTimeDimension !== "month") return;
+  if (customYearEl?.value && customMonthEl?.value) return;
+  applySingleTenantMonthPreset("this-month");
+}
+
+function getSelectedSingleTenantQueryDates() {
+  if (activeSingleTenantTimeDimension === "date") {
+    const date = queryDateEl?.value || formatDate(new Date());
+    if (date > formatDate(new Date())) {
+      throw new Error("查询日期不能晚于当前日期");
+    }
+    return { startDate: date, endDate: date };
+  }
+
+  const year = Number(customYearEl?.value || new Date().getFullYear());
+  const month = Number(customMonthEl?.value || new Date().getMonth() + 1);
+  const start = new Date(year, month - 1, 1);
+  const end = new Date(year, month, 0);
+  const today = new Date();
+  if (year > today.getFullYear() || (year === today.getFullYear() && month > today.getMonth() + 1)) {
+    throw new Error("查询月份不能晚于当前月份");
+  }
+  if (year === today.getFullYear() && month === today.getMonth() + 1) {
+    return { startDate: formatDate(start), endDate: formatDate(today) };
+  }
+  return { startDate: formatDate(start), endDate: formatDate(end) };
+}
+
+function renderFailedSubscriptionsTable(failedSubscriptions, authWarnings) {
+  if (!queryErrorTableWrapEl || !queryErrorTableBodyEl) return;
+  if (!isSingleTenantCostMode()) {
+    queryErrorTableWrapEl.hidden = true;
+    queryErrorTableBodyEl.replaceChildren();
+    return;
+  }
+  const failedRows = Array.isArray(failedSubscriptions) ? failedSubscriptions : [];
+  const warningRows = Array.isArray(authWarnings) ? authWarnings : [];
+  if (failedRows.length === 0 && warningRows.length === 0) {
+    queryErrorTableWrapEl.hidden = true;
+    queryErrorTableBodyEl.replaceChildren();
+    return;
+  }
+
+  if (queryErrorTitleEl) {
+    queryErrorTitleEl.textContent = `查询异常（共 ${failedRows.length + warningRows.length} 项）`;
+  }
+  const rows = failedRows.map((item) => `<tr><td>${escapeHtml(item.tenantName || "-")}</td><td>${escapeHtml(item.subscriptionName || "-")}</td><td>${escapeHtml(item.subscriptionId || "-")}</td><td>${escapeHtml(item.reason || "-")}</td></tr>`);
+  warningRows.forEach((message) => rows.push(`<tr><td colspan="3">认证/订阅级错误</td><td>${escapeHtml(message)}</td></tr>`));
+  queryErrorTableBodyEl.innerHTML = rows.join("");
+  queryErrorTableWrapEl.hidden = false;
+}
+
 queryBtn.addEventListener("click", () => {
   runQuery();
 });
 
 downloadSubscriptionBtn.addEventListener("click", () => {
   exportCsv("subscription");
-});
-
-downloadDailyBtn.addEventListener("click", () => {
-  exportCsv("daily");
-});
-
-downloadResourceTypeBtn.addEventListener("click", () => {
-  exportCsv("resourceType");
-});
-
-downloadDateBtn.addEventListener("click", () => {
-  exportCsv("date");
 });
 
 async function exportCsv(dimension) {
@@ -708,14 +1450,6 @@ function getDimensionRowsByKey(dimensionKey) {
 function renderDimensionTableByKey(dimensionKey) {
   if (dimensionKey === "daily") {
     renderTable(dailyTableWrapEl, getDailyColumns(), getDimensionRowsByKey("daily"), { dimensionKey: "daily", enableFilters: true });
-    return;
-  }
-  if (dimensionKey === "resourceType") {
-    renderTable(resourceTypeTableWrapEl, getResourceColumns(), getDimensionRowsByKey("resourceType"), { dimensionKey: "resourceType", enableFilters: true });
-    return;
-  }
-  if (dimensionKey === "date") {
-    renderTable(dateTableWrapEl, getDateColumns(), getDimensionRowsByKey("date"), { dimensionKey: "date", enableFilters: true });
   }
 }
 
@@ -1016,62 +1750,20 @@ function initPresetButtons() {
     btn.addEventListener("click", () => {
       presetBtns.forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
-
-      if (btn.dataset.preset === "custom") {
-        if (customRangeRowEl) customRangeRowEl.hidden = false;
-        syncDateInputConstraints();
-      } else {
-        if (customRangeRowEl) customRangeRowEl.hidden = true;
-        applyPreset(btn.dataset.preset);
-      }
+      applySingleTenantMonthPreset(btn.dataset.preset || "this-month");
+      activeSingleTenantTimeDimension = "month";
+      applyCostModeUI(getCurrentCostMode());
+      syncCostDimensionPanels();
+      if (isSingleTenantCostMode() || getCurrentCostMode() === "multi") loadCachedResult();
     });
   });
-
-  startDateEl.addEventListener("change", syncDateInputConstraints);
-  endDateEl.addEventListener("change", syncDateInputConstraints);
-
-  // 默认选择"上月"
-  const lastMonthBtn = presetBtns.find((btn) => btn.dataset.preset === "last-month");
-  if (lastMonthBtn) {
-    lastMonthBtn.classList.add("active");
-    applyPreset("last-month");
-  } else {
-    presetBtns.forEach((btn) => btn.classList.remove("active"));
-    if (customRangeRowEl) customRangeRowEl.hidden = true;
-    startDateEl.value = "";
-    endDateEl.value = "";
-  }
-  syncDateInputConstraints();
+  const thisMonthBtn = presetBtns.find((btn) => btn.dataset.preset === "this-month");
+  thisMonthBtn?.classList.add("active");
+  applySingleTenantMonthPreset("this-month");
 }
 
-function applyPreset(preset) {
-  const today = new Date();
-  let start, end;
-
-  if (preset === "last-month") {
-    start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-    end = new Date(today.getFullYear(), today.getMonth(), 0);
-  } else if (preset === "this-month") {
-    start = new Date(today.getFullYear(), today.getMonth(), 1);
-    end = today;
-  } else if (preset === "this-quarter") {
-    const quarter = Math.floor(today.getMonth() / 3);
-    start = new Date(today.getFullYear(), quarter * 3, 1);
-    end = today;
-  } else if (preset === "this-year") {
-    start = new Date(today.getFullYear(), 0, 1);
-    end = today;
-  } else if (preset === "yesterday") {
-    const yesterday = new Date(today);
-    yesterday.setDate(today.getDate() - 1);
-    start = yesterday;
-    end = yesterday;
-  }
-
-  if (start && end) {
-    startDateEl.value = formatDate(start);
-    endDateEl.value = formatDate(end);
-  }
+function getSelectedQueryDates() {
+  return getSelectedSingleTenantQueryDates();
 }
 
 function validateDates(startDate, endDate) {
@@ -1081,26 +1773,8 @@ function validateDates(startDate, endDate) {
   if (new Date(startDate) > new Date(endDate)) {
     throw new Error("开始时间不能晚于结束时间");
   }
-}
-
-function syncDateInputConstraints() {
-  const startDate = startDateEl.value;
-  const endDate = endDateEl.value;
-
-  if (startDate) {
-    endDateEl.min = startDate;
-  } else {
-    endDateEl.removeAttribute("min");
-  }
-
-  if (endDate) {
-    startDateEl.max = endDate;
-  } else {
-    startDateEl.removeAttribute("max");
-  }
-
-  if (startDate && endDate && new Date(endDate) < new Date(startDate)) {
-    endDateEl.value = startDate;
+  if (endDate > formatDate(new Date())) {
+    throw new Error("查询日期不能晚于当前日期");
   }
 }
 
@@ -1218,8 +1892,6 @@ function clearAuthParameters() {
   renderSummary(null);
   renderSubscriptionTable(subscriptionTableWrapEl, []);
   renderTable(dailyTableWrapEl, getDailyColumns(), [], { dimensionKey: "daily", enableFilters: true });
-  renderTable(resourceTypeTableWrapEl, getResourceColumns(), [], { dimensionKey: "resourceType", enableFilters: true });
-  renderTable(dateTableWrapEl, getDateColumns(), [], { dimensionKey: "date", enableFilters: true });
   setCacheInfo("");
   setSettingsModalMessage("本地认证参数设置及缓存数据已删除");
 }
@@ -1494,12 +2166,8 @@ async function importAuthParametersFromFile() {
   try {
     const file = importAuthParamsInput.files[0];
     const fileName = String(file.name || "").toLowerCase();
-    const fileType = String(file.type || "").toLowerCase();
     if (!fileName.endsWith(".csv")) {
       throw new Error("仅支持导入 .csv 格式文件");
-    }
-    if (fileType && !fileType.startsWith("text/")) {
-      throw new Error("仅支持导入 .csv 后缀的文本文件");
     }
 
     const content = await file.text();
@@ -1684,78 +2352,58 @@ function escapeAttr(value) {
 }
 
 function initDimensionTabs() {
-  if (!dimensionTabsEl) {
-    return;
-  }
-
-  const tabs = Array.from(dimensionTabsEl.querySelectorAll(".dimension-tab"));
-  tabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      const dimension = tab.getAttribute("data-dimension");
-      if (!dimension) {
-        return;
-      }
-      switchDimensionPanel(dimension);
-    });
-  });
+  return;
 }
 
 function switchDimensionPanel(dimension) {
-  activeDimension = dimension;
+  activeDimension = dimension === "daily" ? "daily" : "monthly";
+  activeSingleTenantTimeDimension = activeDimension === "daily" ? "date" : "month";
+  syncCostDimensionPanels();
+  if (downloadSubscriptionBtn) downloadSubscriptionBtn.hidden = false;
+}
 
+function syncCostDimensionPanels() {
+  const panelDimension = activeSingleTenantTimeDimension === "date" ? "daily" : "monthly";
   dimensionPanels.forEach((panel) => {
-    const panelDimension = panel.getAttribute("data-dimension-panel");
-    const isActive = panelDimension === dimension;
-    panel.classList.toggle("dimension-panel-hidden", !isActive);
+    const dimension = panel.getAttribute("data-dimension-panel");
+    panel.hidden = dimension !== panelDimension;
   });
-
-  if (!dimensionTabsEl) {
-    return;
-  }
-
-  const tabs = Array.from(dimensionTabsEl.querySelectorAll(".dimension-tab"));
-  tabs.forEach((tab) => {
-    const isActive = tab.getAttribute("data-dimension") === dimension;
-    tab.classList.toggle("active", isActive);
-    tab.setAttribute("aria-selected", isActive ? "true" : "false");
-  });
-
-  downloadSubscriptionBtn.hidden = dimension !== "subscription";
-  downloadDailyBtn.hidden = dimension !== "daily";
-  downloadResourceTypeBtn.hidden = dimension !== "resourceType";
-  downloadDateBtn.hidden = dimension !== "date";
 }
 
 function loadCachedResult() {
   try {
-    const raw = localStorage.getItem(QUERY_CACHE_KEY);
+    const raw = readSingleTenantSelectedCache();
     if (!raw) {
+      currentResult = null;
+      currentRangeText = "-";
+      resetAllTableFilters();
+      renderSummary(null);
+      renderSubscriptionTable(subscriptionTableWrapEl, []);
+      renderTable(dailyTableWrapEl, getDailyColumns(), [], { dimensionKey: "daily", enableFilters: true });
+      setCacheInfo("");
       return;
     }
 
     const cached = JSON.parse(raw);
     if (!cached || typeof cached !== "object" || !cached.result || typeof cached.result !== "object") {
+      currentResult = null;
+      currentRangeText = "-";
+      resetAllTableFilters();
+      renderSummary(null);
+      renderSubscriptionTable(subscriptionTableWrapEl, []);
+      renderTable(dailyTableWrapEl, getDailyColumns(), [], { dimensionKey: "daily", enableFilters: true });
+      setCacheInfo("");
       return;
     }
 
-    if (cached.startDate) {
-      startDateEl.value = String(cached.startDate);
-    }
-    if (cached.endDate) {
-      endDateEl.value = String(cached.endDate);
-    }
-
-    syncDateInputConstraints();
     if (cached.startDate && cached.endDate) {
-      currentRangeText = `${cached.startDate} ~ ${cached.endDate}`;
+      currentRangeText = formatCostQueryRangeText(cached.startDate, cached.endDate);
     }
 
     currentResult = cached.result;
     renderSummary(currentResult);
     renderSubscriptionTable(subscriptionTableWrapEl, currentResult.bySubscription || []);
     renderTable(dailyTableWrapEl, getDailyColumns(), getDailyRows(currentResult), { dimensionKey: "daily", enableFilters: true });
-    renderTable(resourceTypeTableWrapEl, getResourceColumns(), currentResult.byResourceType || [], { dimensionKey: "resourceType", enableFilters: true });
-    renderTable(dateTableWrapEl, getDateColumns(), currentResult.byDate || [], { dimensionKey: "date", enableFilters: true });
 
     const cachedAt = cached.cachedAt ? `，缓存时间: ${formatLocalDateTime(cached.cachedAt)}` : "";
     setCacheInfo(`已加载本地缓存查询结果${cachedAt}`);
@@ -1766,14 +2414,50 @@ function loadCachedResult() {
 
 function saveQueryCache(payload) {
   try {
-    localStorage.setItem(QUERY_CACHE_KEY, JSON.stringify(payload));
+    localStorage.setItem(getQueryCacheKey(), JSON.stringify(payload));
+    {
+      const historyKey = `${SINGLE_TENANT_QUERY_CACHE_HISTORY_KEY}-${getCurrentCostMode()}`;
+      const rawHistory = localStorage.getItem(historyKey);
+      const history = rawHistory ? JSON.parse(rawHistory) : [];
+      const entries = Array.isArray(history) ? history : [];
+      const filtered = entries.filter((entry) => !(
+        String(entry?.startDate || "") === String(payload.startDate || "")
+        && String(entry?.endDate || "") === String(payload.endDate || "")
+      ));
+      filtered.unshift(payload);
+      localStorage.setItem(historyKey, JSON.stringify(filtered.slice(0, 60)));
+    }
   } catch (error) {
     console.error("保存查询缓存失败", error);
   }
 }
 
 function clearQueryCache() {
-  localStorage.removeItem(QUERY_CACHE_KEY);
+  const cachePrefixes = [
+    QUERY_CACHE_KEY,
+    SINGLE_TENANT_QUERY_CACHE_HISTORY_KEY,
+    "azure-query-openai-tier-cache-",
+    "azure-query-azure-token-cache-",
+  ];
+  Object.keys(localStorage).forEach((key) => {
+    if (cachePrefixes.some((prefix) => key.startsWith(prefix))) {
+      localStorage.removeItem(key);
+    }
+  });
+}
+
+function readSingleTenantSelectedCache() {
+  const rawHistory = localStorage.getItem(`${SINGLE_TENANT_QUERY_CACHE_HISTORY_KEY}-${getCurrentCostMode()}`);
+  const history = rawHistory ? JSON.parse(rawHistory) : [];
+  const { startDate, endDate } = getSelectedSingleTenantQueryDates();
+  const matched = Array.isArray(history)
+    ? history.find((entry) => String(entry?.startDate || "") === startDate && String(entry?.endDate || "") === endDate)
+    : null;
+  if (matched) {
+    return JSON.stringify(matched);
+  }
+
+  return Array.isArray(history) && history.length > 0 ? null : localStorage.getItem(getQueryCacheKey());
 }
 
 function formatLocalDateTime(value) {
@@ -1789,5 +2473,14 @@ function formatLocalDateTime(value) {
   const mm = String(date.getMinutes()).padStart(2, "0");
   const ss = String(date.getSeconds()).padStart(2, "0");
   return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
+}
+
+function formatCostQueryRangeText(startDate, endDate) {
+  const startText = String(startDate || "").slice(0, activeSingleTenantTimeDimension === "month" ? 7 : 10);
+  const endText = String(endDate || "").slice(0, activeSingleTenantTimeDimension === "month" ? 7 : 10);
+  if (!startText || !endText) {
+    return "-";
+  }
+  return startText === endText ? startText : `${startText} ~ ${endText}`;
 }
 
